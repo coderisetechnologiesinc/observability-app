@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		026A2E6C2E4D011600F64031 /* ShazamKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 026A2E6B2E4D011600F64031 /* ShazamKit.framework */; };
+		026A2E6E2E4D012100F64031 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 026A2E6D2E4D012100F64031 /* AVFoundation.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		026A2E4E2E4D005100F64031 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -27,6 +32,8 @@
 		026A2E402E4D004900F64031 /* DCDC APP POC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "DCDC APP POC.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		026A2E4D2E4D005100F64031 /* DCDC APP POCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DCDC APP POCTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		026A2E572E4D005100F64031 /* DCDC APP POCUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "DCDC APP POCUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		026A2E6B2E4D011600F64031 /* ShazamKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ShazamKit.framework; path = System/Library/Frameworks/ShazamKit.framework; sourceTree = SDKROOT; };
+		026A2E6D2E4D012100F64031 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +59,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				026A2E6E2E4D012100F64031 /* AVFoundation.framework in Frameworks */,
+				026A2E6C2E4D011600F64031 /* ShazamKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +87,7 @@
 				026A2E422E4D004900F64031 /* DCDC APP POC */,
 				026A2E502E4D005100F64031 /* DCDC APP POCTests */,
 				026A2E5A2E4D005100F64031 /* DCDC APP POCUITests */,
+				026A2E6A2E4D011600F64031 /* Frameworks */,
 				026A2E412E4D004900F64031 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +100,15 @@
 				026A2E572E4D005100F64031 /* DCDC APP POCUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		026A2E6A2E4D011600F64031 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				026A2E6D2E4D012100F64031 /* AVFoundation.framework */,
+				026A2E6B2E4D011600F64031 /* ShazamKit.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -395,11 +414,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 6P4F566JRV;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "DCDC-APP-POC-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app needs microphone access to listen and match audio";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -412,6 +436,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.poc-dcdc.shazamsignaturegenerator.DCDC-APP-POC";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -423,11 +448,16 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
 				DEVELOPMENT_TEAM = 6P4F566JRV;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "DCDC-APP-POC-Info.plist";
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "This app needs microphone access to listen and match audio";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -440,6 +470,7 @@
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.poc-dcdc.shazamsignaturegenerator.DCDC-APP-POC";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
