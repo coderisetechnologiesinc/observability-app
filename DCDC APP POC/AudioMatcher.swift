@@ -1,41 +1,81 @@
 import ShazamKit
 import AVFAudio
 
+struct CircularBuffer<T> {
+    private var buffer: [T?]
+    private var head = 0
+    private var count = 0
+    private let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = capacity
+        self.buffer = Array<T?>(repeating: nil, count: capacity)
+    }
+
+    mutating func append(_ element: T) {
+        buffer[head] = element
+        head = (head + 1) % capacity
+        if count < capacity {
+            count += 1
+        }
+    }
+
+    var isEmpty: Bool { count == 0 }
+    var isFull: Bool { count == capacity }
+}
+
+@MainActor
 class AudioMatcher: NSObject, ObservableObject, SHSessionDelegate {
-    // MARK: - Properties
+    private let audioQueue = DispatchQueue(label: "audio.processing", qos: .userInteractive)
+    private let calculationQueue = DispatchQueue(label: "sync.calculations", qos: .userInteractive)
     private var session: SHSession?
     private let audioEngine = AVAudioEngine()
     private var catalogManager = ShazamCatalogManager()
     private var sessionStartTime: Date?
-    
-    // CONTINUOUS CYCLE: Listen → Match → Pause 5s → Repeat
+
     private var listeningStartTime: Date?
     private var matchFoundTime: Date?
     private var restartTimer: Timer?
-    @MainActor @Published var isListening = false
-    @MainActor @Published var isCurrentlyListening: Bool = false
-    @MainActor @Published var matchCount: Int = 0
-    @MainActor @Published var pauseCountdown: Int = 0
+    @Published var isListening = false
+    @Published var isCurrentlyListening: Bool = false
+    @Published var matchCount: Int = 0
+    @Published var pauseCountdown: Int = 0
     private var hasFoundMatchThisSession: Bool = false
-    
-    // UI Properties
-    @MainActor @Published var consoleLog: String = "System ready\n"
-    @MainActor @Published var matchTime: Double = 0.0
-    @MainActor @Published var matchHistory: [Double] = []
-    @MainActor @Published var isPerformanceGood: Bool = true
-    
-    // Timing tracking for UI
+    @Published var isCycleEnabled: Bool = false
+
+    private var firstListeningStartTime: Date?
+    private var firstMatchFoundTime: Date?
+    @Published var startToFirstMatchSeconds: Double = 0.0
+    @Published var matchToSeekLatencyMs: Double = 0.0
+    @Published var currentPlayerTimeAtMatch: Double = 0.0
+
+    private var bufferProcessingStartTime: Date?
+    @Published var measuredProcessingDelayMs: Double = 0.0
+    @Published var inputBufferDelayMs: Double = 0.0
+    @Published var playerSeekDelayMs: Double = 0.0
+    @Published var audioOutputLatencyMs: Double = 0.0
+    @Published var audioInputLatencyMs: Double = 0.0
+
+    @Published var consoleLog: String = "System ready\n"
+    private var logBuffer: [String] = []
+    private let maxLogEntries = 100
+    @Published var matchTime: Double = 0.0
+    @Published var matchHistory: [Double] = []
+    @Published var isPerformanceGood: Bool = true
+
     private var currentMatchStartTime: UInt64 = 0
-    private var matchToSeekTimes: [Double] = []
-    @MainActor @Published var matchToSeekTime: Double = 0.0
-    
-    // Computed property for formatted time display
-    @MainActor var formattedMatchTime: String {
+    private var matchToSeekTimes = CircularBuffer<Double>(capacity: 20)
+    @Published var matchToSeekTime: Double = 0.0
+
+    var getCurrentPlayerTime: (() -> Double)?
+    var seekWithTimestamp: ((Double, UInt64) -> Void)?
+
+    var formattedMatchTime: String {
         let hours = Int(matchTime) / 3600
         let minutes = Int(matchTime) % 3600 / 60
         let seconds = Int(matchTime) % 60
         let milliseconds = Int((matchTime.truncatingRemainder(dividingBy: 1)) * 1000)
-        
+
         if hours > 0 {
             return String(format: "%d:%02d:%02d.%03d", hours, minutes, seconds, milliseconds)
         } else if minutes > 0 {
@@ -45,216 +85,282 @@ class AudioMatcher: NSObject, ObservableObject, SHSessionDelegate {
         }
     }
     
-    // MARK: - Public Methods
     func prepare() async {
-        await log("Preparing catalog...")
-        
+        log("Preparing catalog...")
+
         do {
             try await catalogManager.loadCatalog()
-            await log("Catalog prepared successfully")
+            log("Catalog prepared successfully")
         } catch {
-            await log("Catalog error: \(error.localizedDescription)")
+            log("Catalog error: \(error.localizedDescription)")
         }
     }
-    
-    @MainActor
+
     func clearLog() {
         consoleLog = "System ready\n"
     }
     
     func startListening() async {
-        guard !(await isListening) else { return }
-        
-        await MainActor.run {
-            isListening = true
-            sessionStartTime = Date()
-            matchCount = 0
-            hasFoundMatchThisSession = false
-            listeningStartTime = Date()
-            isCurrentlyListening = true
+        guard !isListening else { return }
+
+        isListening = true
+        sessionStartTime = Date()
+        matchCount = 0
+        hasFoundMatchThisSession = false
+        listeningStartTime = Date()
+        isCurrentlyListening = true
+
+        if firstListeningStartTime == nil {
+            firstListeningStartTime = Date()
+            log("ECHO DEBUG: First listening session started at \(timestamp())")
         }
-        
-        // Start single listening session
+
         await startSingleListeningSession()
-        await log("Continuous cycle started - waiting for first offset...")
+        log("Continuous cycle started - waiting for first offset...")
     }
     
-    // SINGLE-MATCH SESSION: Listen until we get one match
     private func startSingleListeningSession() async {
         do {
             let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.record)
+            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
             try audioSession.setActive(true)
-            
+
+            // Measure device audio latencies
+            let outputLatency = audioSession.outputLatency
+            let inputLatency = audioSession.inputLatency
+            audioOutputLatencyMs = outputLatency * 1000
+            audioInputLatencyMs = inputLatency * 1000
+            log("DEVICE LATENCIES: Input \(String(format: "%.1f", audioInputLatencyMs))ms, Output \(String(format: "%.1f", audioOutputLatencyMs))ms")
+
             let catalog = catalogManager.getCatalog()
             session = SHSession(catalog: catalog)
             session?.delegate = self
-            
+
             audioEngine.stop()
             audioEngine.reset()
-            
+
             let inputNode = audioEngine.inputNode
             let format = inputNode.outputFormat(forBus: 0)
-            
+
             inputNode.removeTap(onBus: 0)
             inputNode.installTap(
                 onBus: 0,
                 bufferSize: 1024,
                 format: format,
                 block: { [weak self] buffer, time in
-                    // Only process if we haven't found a match yet
-                    if self?.hasFoundMatchThisSession == false {
-                        self?.processAudioBuffer(buffer, at: time)
-                    }
+                    self?.processAudioBuffer(buffer, at: time)
                 }
             )
-            
+
             audioEngine.prepare()
             try audioEngine.start()
         } catch {
-            await log("Single session start error: \(error.localizedDescription)")
+            log("Single session start error: \(error.localizedDescription)")
         }
     }
     
     private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, at time: AVAudioTime?) {
-        guard let audioTime = time else { return }
-        
-        // Send to Shazam for processing
-        session?.matchStreamingBuffer(buffer, at: audioTime)
+        guard let audioTime = time, !hasFoundMatchThisSession else { return }
+
+        audioQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            _ = mach_absolute_time() // Processing start timestamp
+
+            // Pre-calculate timing values
+            let audioTimestamp = audioTime.audioTimeStamp
+            let currentSystemTime = mach_absolute_time()
+            let inputBufferDelay = Double(currentSystemTime - audioTimestamp.mHostTime) / 1_000_000_000.0
+
+            Task { @MainActor in
+                self.bufferProcessingStartTime = Date()
+                self.inputBufferDelayMs = inputBufferDelay * 1000
+            }
+
+            self.session?.matchStreamingBuffer(buffer, at: audioTime)
+        }
     }
     
     func stopListening() async {
-        guard await isListening else { return }
-        
-        // Stop all timers  
-        await MainActor.run {
-            restartTimer?.invalidate()
-            restartTimer = nil
-            isListening = false
-            isCurrentlyListening = false
-            pauseCountdown = 0
-        }
-        
-        // Actually stop audio engine
+        guard isListening else { return }
+
+        restartTimer?.invalidate()
+        restartTimer = nil
+        isListening = false
+        isCurrentlyListening = false
+        pauseCountdown = 0
+
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        
-        do {
-            try AVAudioSession.sharedInstance().setActive(false)
-        } catch {
-            await log("Audio session stop error: \(error.localizedDescription)")
-        }
-        
-        await MainActor.run {
-            consoleLog += "[\(timestamp())] Continuous cycle stopped\n"
-            
-            log("📈 Session Summary:")
-            log("   Total matches found: \(matchCount)")
-            log("   Continuous cycle approach")
-            log("   80ms threshold active")
-        }
+
+        session = nil
+
+        consoleLog += "[\(timestamp())] Continuous cycle stopped\n"
+
+        log("Session Summary:")
+        log("   Total matches found: \(matchCount)")
+        log("   Continuous cycle approach")
+        log("   80ms threshold active")
     }
     
-    // MARK: - Shazam Delegates - Simplified for Single-Match Approach
-    func session(_ session: SHSession, didFind match: SHMatch) {
+    nonisolated func session(_ session: SHSession, didFind match: SHMatch) {
+        _ = mach_absolute_time() // Match found timestamp
+
         Task { @MainActor in
             guard let matchedItem = match.mediaItems.first else { return }
-            
-            // Get the match offset from reference audio
+
             let referenceMatchTime = matchedItem.matchOffset
-            
-            // Set match start time for seek tracking
+            let syncStartTime = mach_absolute_time()
+
+            // Calculate processing delay using high-precision timing
+            var measuredProcessingDelay = 0.0008 // 0.8ms default
+            if let bufferStart = self.bufferProcessingStartTime {
+                let currentTime = Date()
+                measuredProcessingDelay = currentTime.timeIntervalSince(bufferStart)
+            }
+
+            self.matchFoundTime = Date()
+            self.measuredProcessingDelayMs = measuredProcessingDelay * 1000
+            self.log("PROCESSING DELAY: \(String(format: "%.1f", self.measuredProcessingDelayMs))ms")
+            self.log("INPUT BUFFER DELAY: \(String(format: "%.1f", self.inputBufferDelayMs))ms")
+
+            if self.firstMatchFoundTime == nil {
+                self.firstMatchFoundTime = Date()
+                if let firstStart = self.firstListeningStartTime {
+                    self.startToFirstMatchSeconds = Date().timeIntervalSince(firstStart)
+                    self.log("ECHO DEBUG: Start-to-first-match: \(String(format: "%.3f", self.startToFirstMatchSeconds))s")
+                }
+            }
+
             self.currentMatchStartTime = mach_absolute_time()
-            
-            // SINGLE-MATCH APPROACH: Simple, accurate calculation
+
+
             guard let startTime = self.listeningStartTime else {
-                self.log("❌ No listening start time available")
+                self.log("ERROR: No listening start time available")
                 return
             }
-            
-            // Record when match was found
-            let matchTime = Date()
-            self.matchFoundTime = matchTime
-            
-            // Calculate theater time: match offset + time elapsed since listening started  
-            let timeElapsed = matchTime.timeIntervalSince(startTime)
-            let currentTheaterTime = referenceMatchTime + timeElapsed
-            
-            // STOP listening immediately to prevent duplicate matches
-            await self.stopCurrentListeningSession()
-            
-            self.log("🎯 SINGLE-MATCH CALCULATION:")
+
+            let timeElapsed = Date().timeIntervalSince(startTime)
+            let currentPlayerTime = self.getCurrentPlayerTime?() ?? 0.0
+
+            // Calculate sync on background queue
+            let syncResult = await withCheckedContinuation { continuation in
+                calculationQueue.async {
+                    let inputBufferDelaySeconds = self.inputBufferDelayMs / 1000.0
+                    let playerSeekDelaySeconds = self.playerSeekDelayMs / 1000.0
+                    let deviceLatencySeconds = (self.audioInputLatencyMs + self.audioOutputLatencyMs) / 1000.0
+
+                    // Dynamic buffer based on processing speed
+                    let dynamicBuffer = max(0.001, measuredProcessingDelay * 0.1)
+
+                    let currentTheaterTime = referenceMatchTime + timeElapsed +
+                                           measuredProcessingDelay + inputBufferDelaySeconds +
+                                           playerSeekDelaySeconds + deviceLatencySeconds + dynamicBuffer + 0.1
+
+                    let timeDifference = abs(currentPlayerTime - currentTheaterTime)
+                    let shouldSeek = timeDifference > 0.08
+
+                    continuation.resume(returning: (shouldSeek: shouldSeek, targetTime: currentTheaterTime, timeDifference: timeDifference))
+                }
+            }
+
+            let currentTheaterTime = syncResult.targetTime
+
+            if self.isCycleEnabled {
+                await self.stopCurrentListeningSession()
+            } else {
+                self.isListening = false
+                self.isCurrentlyListening = false
+                self.pauseCountdown = 0
+
+                self.audioEngine.stop()
+                self.audioEngine.inputNode.removeTap(onBus: 0)
+                self.session = nil
+            }
+
+            self.log("SINGLE-MATCH CALCULATION:")
             self.log("   Match found at: \(String(format: "%.3f", referenceMatchTime))s in reference")
             self.log("   Time since start: \(String(format: "%.3f", timeElapsed))s")
-            self.log("   🎬 Current theater time: \(String(format: "%.3f", currentTheaterTime))s")
-            self.log("   📝 Single-match approach: Simple and accurate")
-            self.log("   ⏹️ Stopping listening to prevent duplicates")
-            
-            // Mark session as complete
+            self.log("   Measured processing delay: \(String(format: "%.3f", measuredProcessingDelay))s")
+            self.log("   Current theater time: \(String(format: "%.3f", currentTheaterTime))s")
+            self.log("   Single-match approach with measured processing compensation")
+            if self.isCycleEnabled {
+                self.log("   Cycle enabled - restarting in 5 seconds")
+            } else {
+                self.log("   Session paused automatically after match")
+            }
+
             self.hasFoundMatchThisSession = true
             self.matchCount += 1
-            
-            // Send the theater time for sync (will be checked for 80ms threshold)
-            self.matchTime = currentTheaterTime
-            self.matchHistory.append(currentTheaterTime)
-            
-            consoleLog += """
-            [\(timestamp())] SINGLE-MATCH SYNC
-            Title: \(matchedItem.title ?? "Unknown")
-            Match #\(self.matchCount) • Elapsed: \(String(format: "%.1f", timeElapsed))s
-            Theater NOW: \(String(format: "%.3f", currentTheaterTime))s
-            \n
-            """
+
+            self.log("SYNC VALIDATION:")
+            self.log("   Theater calculated at: \(String(format: "%.3f", currentTheaterTime))s")
+            self.log("   Player currently at: \(String(format: "%.3f", currentPlayerTime))s")
+            self.log("   Difference: \(String(format: "%.0f", syncResult.timeDifference * 1000))ms")
+
+            if !syncResult.shouldSeek {
+                self.log("   ALREADY IN SYNC: Difference \(String(format: "%.0f", syncResult.timeDifference * 1000))ms ≤ 80ms")
+                self.log("   Skipping player adjustment - maintaining current position")
+
+                self.matchHistory.append(currentTheaterTime)
+                self.matchTime = 0.0
+            } else {
+                self.log("   NEEDS SYNC: Difference \(String(format: "%.0f", syncResult.timeDifference * 1000))ms > 80ms")
+                self.log("   Triggering player seek to theater position")
+
+                let seekStartTime = mach_absolute_time()
+                if let seekWithTimestamp = self.seekWithTimestamp {
+                    seekWithTimestamp(currentTheaterTime, seekStartTime)
+                }
+
+                self.matchTime = currentTheaterTime
+                self.matchHistory.append(currentTheaterTime)
+            }
+
+            let syncLogEntry = "[\(timestamp())] SINGLE-MATCH SYNC\nTitle: \(matchedItem.title ?? "Unknown")\nMatch #\(self.matchCount) • Elapsed: \(String(format: "%.1f", timeElapsed))s\nTheater NOW: \(String(format: "%.3f", currentTheaterTime))s\n"
+
+            logBuffer.append(syncLogEntry)
+            if logBuffer.count > maxLogEntries {
+                logBuffer.removeFirst(logBuffer.count - maxLogEntries)
+            }
+            consoleLog = logBuffer.joined()
         }
     }
     
-    func session(_ session: SHSession, didNotFindMatchFor signature: SHSignature, error: Error?) {
+    nonisolated func session(_ session: SHSession, didNotFindMatchFor signature: SHSignature, error: Error?) {
         Task { @MainActor in
             consoleLog += "[\(timestamp())] No match: \(error?.localizedDescription ?? "Unknown error")\n"
         }
     }
-    
-    // CONTINUOUS CYCLE: Stop listening and start 5-second pause timer
+
     private func stopCurrentListeningSession() async {
-        await MainActor.run {
-            hasFoundMatchThisSession = true
-            isCurrentlyListening = false
-            pauseCountdown = 5
-        }
-        
+        hasFoundMatchThisSession = true
+        isCurrentlyListening = false
+        pauseCountdown = 5
+
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        
-        do {
-            try AVAudioSession.sharedInstance().setActive(false)
-        } catch {
-            await log("Session stop error: \(error.localizedDescription)")
-        }
-        
-        await log("✅ Match found - pausing 5 seconds before next cycle")
-        
-        // Start 5-second restart timer
-        await MainActor.run {
-            self.restartTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    await self?.handlePauseCountdown()
-                }
+
+        session = nil
+
+        log("Match found - pausing 5 seconds before next cycle")
+
+        self.restartTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                await self?.handlePauseCountdown()
             }
         }
     }
-    
-    @MainActor
+
     private func handlePauseCountdown() async {
         pauseCountdown -= 1
-        
+
         if pauseCountdown <= 0 {
-            // Stop the timer
             restartTimer?.invalidate()
             restartTimer = nil
-            
-            // Restart listening if still in overall listening mode
+
             if isListening {
-                await log("🔄 5-second pause complete - restarting listening...")
+                log("5-second pause complete - restarting listening...")
                 hasFoundMatchThisSession = false
                 listeningStartTime = Date()
                 isCurrentlyListening = true
@@ -262,32 +368,42 @@ class AudioMatcher: NSObject, ObservableObject, SHSessionDelegate {
             }
         }
     }
-    
-    // Track seek command timing
-    func trackSeekCommand(startTime: UInt64) {
+
+    func recordPlayerSeekDelay(seekStartTime: UInt64, seekCompletionTime: UInt64) {
+        Task { @MainActor in
+            let seekDelaySeconds = Double(seekCompletionTime - seekStartTime) / 1_000_000_000.0
+            self.playerSeekDelayMs = seekDelaySeconds * 1000
+            self.log("PLAYER SEEK DELAY: \(String(format: "%.1f", self.playerSeekDelayMs))ms")
+        }
+    }
+
+    func trackSeekCommand(startTime: UInt64, currentPlayerTime: Double) {
         Task { @MainActor in
             if self.currentMatchStartTime > 0 {
                 guard startTime >= self.currentMatchStartTime else {
-                    self.log("⚠️ Timing anomaly: seek command before match")
+                    self.log("Timing anomaly: seek command before match")
                     return
                 }
-                
+
                 let matchToSeekDuration = Double(startTime - self.currentMatchStartTime) / 1_000_000_000.0
-                
+
                 guard matchToSeekDuration < 20.0 else {
-                    self.log("⚠️ Unreasonable match-to-seek time: \(String(format: "%.1f", matchToSeekDuration * 1000))ms")
+                    self.log(" Unreasonable match-to-seek time: \(String(format: "%.1f", matchToSeekDuration * 1000))ms")
                     return
                 }
-                
+
                 self.matchToSeekTimes.append(matchToSeekDuration)
-                if self.matchToSeekTimes.count > 20 {
-                    self.matchToSeekTimes.removeFirst()
-                }
-                
+
                 self.matchToSeekTime = matchToSeekDuration
-                
-                self.log("🎮 SEEK COMMAND ISSUED:")
-                self.log("   Match→Seek latency: \(String(format: "%.1f", matchToSeekDuration * 1000))ms")
+                self.matchToSeekLatencyMs = matchToSeekDuration * 1000
+                self.currentPlayerTimeAtMatch = currentPlayerTime
+
+                self.log("ECHO DEBUG - SEEK COMMAND:")
+                self.log("   Match to Seek latency: \(String(format: "%.1f", matchToSeekDuration * 1000))ms")
+                self.log("   Player time when match found: \(String(format: "%.3f", currentPlayerTime))s")
+                self.log("   Time difference analysis:")
+                self.log("     - Start-to-first-match: \(String(format: "%.3f", self.startToFirstMatchSeconds))s")
+                self.log("     - Match-to-seek latency: \(String(format: "%.1f", self.matchToSeekLatencyMs))ms")
             }
         }
     }
@@ -296,53 +412,45 @@ class AudioMatcher: NSObject, ObservableObject, SHSessionDelegate {
         Task { @MainActor in
             if self.currentMatchStartTime > 0 {
                 let totalDuration = Double(completionTime - self.currentMatchStartTime) / 1_000_000_000.0
-                
-                self.isPerformanceGood = totalDuration < 0.1 // < 100ms for accessibility
-                
-                self.log("🏁 SEEK COMPLETED - Final Timing:")
+
+                self.isPerformanceGood = totalDuration < 0.08
+
+                self.log("SEEK COMPLETED - Final Timing:")
                 self.log("   Total end-to-end: \(String(format: "%.1f", totalDuration * 1000))ms")
-                
+
                 if totalDuration > 0.1 {
-                    self.log("   🚨 ACCESSIBILITY ALERT: Total time > 100ms!")
-                } else if totalDuration > 0.05 {
-                    self.log("   ⚠️ MODERATE: Total time 50-100ms")
+                    self.log("   ACCESSIBILITY ALERT: Total time > 100ms!")
+                } else if totalDuration > 0.08 {
+                    self.log("   MODERATE: Total time 80-100ms")
                 } else {
-                    self.log("   ✅ EXCELLENT: Total time < 50ms")
+                    self.log("   EXCELLENT: Total time < 80ms")
                 }
-                
-                // Reset for next match
+
                 self.currentMatchStartTime = 0
             }
         }
     }
-    
-    // Smart seek optimization - checks if seek is necessary (NO LOOK-AHEAD)
-    @MainActor func shouldPerformSeek(targetTime: Double, currentPlayerTime: Double) -> Bool {
+
+    func shouldPerformSeek(targetTime: Double, currentPlayerTime: Double) -> Bool {
         let timeDifference = abs(currentPlayerTime - targetTime)
-        
-        if timeDifference <= 0.08 { // 80ms threshold
-            self.log("🎯 SMART SKIP: Player at \(String(format: "%.2f", currentPlayerTime))s, target \(String(format: "%.2f", targetTime))s")
-            self.log("   Difference: \(String(format: "%.0f", timeDifference * 1000))ms ≤ 80ms threshold")
-        } else {
-            self.log("🎯 PRECISE SEEK:")
-            self.log("   Player current: \(String(format: "%.3f", currentPlayerTime))s")
-            self.log("   Target: \(String(format: "%.3f", targetTime))s")
-            self.log("   Difference: \(String(format: "%.0f", timeDifference * 1000))ms")
-        }
-        
         return timeDifference > 0.08
     }
-    
-    // MARK: - Private Helpers
+
     private func timestamp() -> String {
         let formatter = DateFormatter()
         formatter.timeStyle = .medium
         return formatter.string(from: Date())
     }
-    
-    @MainActor
+
     private func log(_ message: String) {
-        consoleLog += "[\(timestamp())] \(message)\n"
+        let timestampedMessage = "[\(timestamp())] \(message)\n"
+
+        logBuffer.append(timestampedMessage)
+        if logBuffer.count > maxLogEntries {
+            logBuffer.removeFirst(logBuffer.count - maxLogEntries)
+        }
+
+        consoleLog = logBuffer.joined()
         print("[DEBUG] \(message)")
     }
 }
